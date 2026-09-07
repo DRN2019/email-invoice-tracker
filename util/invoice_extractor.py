@@ -14,6 +14,8 @@ MODEL_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF"
 MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
 MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 
+MAX_BODY_CHARS = 12000
+
 SYSTEM_PROMPT = (
     "You are an assistant that reads emails and identifies whether they are an invoice or bill. "
     "Respond with ONLY a JSON object, no other text, matching this schema:\n"
@@ -55,9 +57,11 @@ class InvoiceExtractor:
         self.register_api()
 
         results = []
-        for email in emails:
+        for i, email in enumerate(emails):
+            print(f"Processing email {i}!")
             invoice_data = self.extract_invoice_amount(email)
             if invoice_data.is_invoice:
+                print("Invoice found! Adding row to google sheet")
                 self.output_to_google_sheet(invoice_data)
                 results.append(invoice_data)
         return results
@@ -81,7 +85,7 @@ class InvoiceExtractor:
             MODEL_DIR.mkdir(parents=True, exist_ok=True)
             hf_hub_download(repo_id=MODEL_REPO, filename=MODEL_FILE, local_dir=MODEL_DIR)
 
-        self.llm = Llama(model_path=str(model_path), n_ctx=4096, verbose=False)
+        self.llm = Llama(model_path=str(model_path), n_ctx=8192, verbose=False)
         self.sheets_client = GoogleSheetsClient(self.google_sheet_id, self.google_service_account_path)
 
     def extract_invoice_amount(self, email: dict) -> InvoiceData:
@@ -98,6 +102,7 @@ class InvoiceExtractor:
             ],
             temperature=0,
             max_tokens=300,
+            stream=False,
             response_format={
                 "type": "json_object",
                 "schema": {
@@ -116,19 +121,19 @@ class InvoiceExtractor:
             },
         )
 
-        for message, i in iter(response):
-            print(f"Message {i}: ")
-            print(message + "\n")
-
-        return InvoiceData(is_invoice = False)
-        # raw_output = response["choices"][0]["message"]["content"]
-        # return self._parse_response(raw_output)
+        # stream=False guarantees a single dict, not the Iterator variant of the return union
+        assert isinstance(response, dict)
+        raw_output = response["choices"][0]["message"]["content"]
+        if raw_output is None:
+            return InvoiceData(is_invoice=False)
+        return self._parse_response(raw_output)
 
     @staticmethod
     def _build_prompt(email: dict) -> str:
-        """Feeds subject + body verbatim; the plain-text body is expected to already
-        come from the source (e.g. Graph's Prefer header), not raw HTML."""
-        return f"Subject: {email.get('subject', '')}\n\nBody:\n{email.get('body', '')}"
+        """Truncates the body defensively so one oversized email (long footer,
+        quoted thread, etc.) can't push the prompt past the model's context window."""
+        body = email.get("body", "")[:MAX_BODY_CHARS]
+        return f"Subject: {email.get('subject', '')}\n\nBody:\n{body}"
 
     @staticmethod
     def _parse_response(raw_output: str) -> InvoiceData:
