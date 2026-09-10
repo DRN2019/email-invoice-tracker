@@ -88,7 +88,7 @@ class InvoiceExtractor:
         self.llm = Llama(model_path=str(model_path), n_ctx=8192, verbose=False)
         self.sheets_client = GoogleSheetsClient(self.google_sheet_id, self.google_service_account_path)
 
-    def extract_invoice_amount(self, email: dict) -> InvoiceData:
+    def extract_invoice_amount(self, email: dict, verbose: bool = False) -> InvoiceData:
         """Prompts the local model with a response_format schema so its output
         is grammar-constrained to match InvoiceData's shape."""
         # Check for llm existence
@@ -124,6 +124,8 @@ class InvoiceExtractor:
         # stream=False guarantees a single dict, not the Iterator variant of the return union
         assert isinstance(response, dict)
         raw_output = response["choices"][0]["message"]["content"]
+        if verbose:
+            print(f"raw model output: {raw_output!r}")
         if raw_output is None:
             return InvoiceData(is_invoice=False)
         return self._parse_response(raw_output)
