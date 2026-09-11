@@ -116,6 +116,7 @@ class InvoiceExtractor:
 
         self.llm = Llama(model_path=str(model_path), n_ctx=8192, verbose=False)
         self.sheets_client = GoogleSheetsClient(self.google_sheet_id, self.google_service_account_path)
+        self.sheets_client.ensure_header_row()
 
     def extract_invoice_amount(self, email: dict, verbose: bool = False) -> InvoiceData:
         """Two-stage detection: first classify from the subject line alone (cheap,

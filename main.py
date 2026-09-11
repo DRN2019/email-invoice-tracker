@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from util.graph_client import GraphEmailClient
 from util.invoice_extractor import InvoiceExtractor
 
-LOOKBACK_HOURS = 1000
+LOOKBACK_HOURS = 24
 
 
 def main() -> None:
