@@ -1,5 +1,6 @@
 .env
 models/
+test/
 __pycache__/
 .venv/
 token_cache.bin

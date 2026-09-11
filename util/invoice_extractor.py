@@ -14,16 +14,43 @@ MODEL_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF"
 MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
 MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 
-MAX_BODY_CHARS = 12000
+DEFAULT_MAX_BODY_CHARS = 12000
 
-SYSTEM_PROMPT = (
-    "You are an assistant that reads emails and identifies whether they are an invoice or bill. "
-    "Respond with ONLY a JSON object, no other text, matching this schema:\n"
-    '{"is_invoice": bool, "vendor": string|null, "amount": number|null, "currency": string|null, '
-    '"invoice_number": string|null, "invoice_date": string|null, "due_date": string|null}\n'
-    "Dates must be in YYYY-MM-DD format if present. "
-    'If the email is not an invoice or bill, respond with {"is_invoice": false}.'
+CLASSIFY_SYSTEM_PROMPT = (
+    "You are an assistant that reads only the subject line of an email and decides whether it is "
+    "an invoice or bill (this includes notifications that a bill/invoice is ready to view, e.g. "
+    "'Your bill from X is now available', 'Invoice #1234 from Y', 'Payment due'). "
+    'Respond with ONLY a JSON object, no other text, matching this schema: {"is_invoice": bool}'
 )
+
+EXTRACT_SYSTEM_PROMPT = (
+    "You are an assistant that reads an email already confirmed to be an invoice or bill, and "
+    "extracts its structured details. Respond with ONLY a JSON object, no other text, matching "
+    "this schema:\n"
+    '{"vendor": string|null, "amount": number|null, "currency": string|null, '
+    '"invoice_number": string|null, "invoice_date": string|null, "due_date": string|null}\n'
+    "Dates must be in YYYY-MM-DD format if present. Pay close attention to correctly identifying "
+    "the total amount due, even if it is labeled as 'Total Balance' or similar rather than 'Amount'."
+)
+
+CLASSIFY_SCHEMA = {
+    "type": "object",
+    "properties": {"is_invoice": {"type": "boolean"}},
+    "required": ["is_invoice"],
+}
+
+EXTRACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "vendor": {"type": "string"},
+        "amount": {"type": "number"},
+        "currency": {"type": "string"},
+        "invoice_number": {"type": "string"},
+        "invoice_date": {"type": "string"},
+        "due_date": {"type": "string"},
+    },
+    "required": [],
+}
 
 
 @dataclass
@@ -49,6 +76,7 @@ class InvoiceExtractor:
 
         self.llm: Llama | None = None
         self.sheets_client = None
+        self.max_body_chars: int = DEFAULT_MAX_BODY_CHARS
 
     def extract(self, emails: list[dict]) -> list[InvoiceData]:
         """Entry point: loads config and the model once, then runs each email
@@ -72,6 +100,7 @@ class InvoiceExtractor:
         load_dotenv()
         self.google_sheet_id = os.environ["GOOGLE_SHEET_ID"]
         self.google_service_account_path = os.environ["GOOGLE_SERVICE_ACCOUNT_PATH"]
+        self.max_body_chars = int(os.environ.get("MAX_BODY_CHARS", DEFAULT_MAX_BODY_CHARS))
 
     def register_api(self) -> None:
         """Downloads the GGUF weights into models/ only on first run, then loads
@@ -89,67 +118,98 @@ class InvoiceExtractor:
         self.sheets_client = GoogleSheetsClient(self.google_sheet_id, self.google_service_account_path)
 
     def extract_invoice_amount(self, email: dict, verbose: bool = False) -> InvoiceData:
-        """Prompts the local model with a response_format schema so its output
-        is grammar-constrained to match InvoiceData's shape."""
+        """Two-stage detection: first classify from the subject line alone (cheap,
+        and free of the marketing/tracking-link noise that buries the signal in
+        many bill bodies), then only run the heavier full-body extraction call
+        for emails that pass that gate."""
+        
+        if not self._classify_from_subject(email, verbose=verbose):
+            return InvoiceData(is_invoice=False)
+
+        return self._extract_details(email, verbose=verbose)
+
+    def _classify_from_subject(self, email: dict, verbose: bool = False) -> bool:
+        """Stage 1: subject-only yes/no gate."""
+
         # Check for llm existence
         if self.llm is None:
             raise Exception("LLM is not defined")
         
         response = self.llm.create_chat_completion(
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Subject: {email.get('subject', '')}"},
+            ],
+            temperature=0,
+            max_tokens=50,
+            stream=False,
+            response_format={"type": "json_object", "schema": CLASSIFY_SCHEMA},
+        )
+
+        assert isinstance(response, dict)
+        raw_output = response["choices"][0]["message"]["content"]
+        if verbose:
+            print(f"raw classify output: {raw_output!r}")
+        if raw_output is None:
+            return False
+
+        try:
+            start = raw_output.index("{")
+            end = raw_output.rindex("}") + 1
+            data = json.loads(raw_output[start:end])
+        except (ValueError, json.JSONDecodeError):
+            return False
+
+        return bool(data.get("is_invoice", False))
+
+    def _extract_details(self, email: dict, verbose: bool = False) -> InvoiceData:
+        """Stage 2: given an email already classified as an invoice/bill, pulls
+        out the structured fields (vendor, amount, dates, etc.) from the full body."""
+
+        # Check for llm existence
+        if self.llm is None:
+            raise Exception("LLM is not defined")
+
+        response = self.llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
                 {"role": "user", "content": self._build_prompt(email)},
             ],
             temperature=0,
             max_tokens=300,
             stream=False,
-            response_format={
-                "type": "json_object",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "is_invoice": {"type": "boolean"},
-                        "vendor": {"type": "string"},
-                        "amount": {"type": "number"},
-                        "currency": {"type": "string"},
-                        "invoice_number": {"type": "string"},
-                        "invoice_date": {"type": "string"},
-                        "due_date": {"type": "string"},
-                    },
-                    "required": ["is_invoice"],
-                },
-            },
+            response_format={"type": "json_object", "schema": EXTRACT_SCHEMA},
         )
 
         # stream=False guarantees a single dict, not the Iterator variant of the return union
         assert isinstance(response, dict)
         raw_output = response["choices"][0]["message"]["content"]
         if verbose:
-            print(f"raw model output: {raw_output!r}")
+            print(f"raw extract output: {raw_output!r}")
         if raw_output is None:
-            return InvoiceData(is_invoice=False)
-        return self._parse_response(raw_output)
+            return InvoiceData(is_invoice=True)
+        return self._parse_extract_response(raw_output)
 
-    @staticmethod
-    def _build_prompt(email: dict) -> str:
+    def _build_prompt(self, email: dict) -> str:
         """Truncates the body defensively so one oversized email (long footer,
         quoted thread, etc.) can't push the prompt past the model's context window."""
-        body = email.get("body", "")[:MAX_BODY_CHARS]
+        body = email.get("body", "")[: self.max_body_chars]
         return f"Subject: {email.get('subject', '')}\n\nBody:\n{body}"
 
     @staticmethod
-    def _parse_response(raw_output: str) -> InvoiceData:
-        """Falls back to is_invoice=False on any malformed output rather than
-        raising, so one bad email doesn't kill extraction for the rest of the batch."""
+    def _parse_extract_response(raw_output: str) -> InvoiceData:
+        """Falls back to a bare is_invoice=True on any malformed output rather than
+        raising, so one bad email doesn't kill extraction for the rest of the batch --
+        the classify stage has already established this email is an invoice."""
         try:
             start = raw_output.index("{")
             end = raw_output.rindex("}") + 1
             data = json.loads(raw_output[start:end])
         except (ValueError, json.JSONDecodeError):
-            return InvoiceData(is_invoice=False)
+            return InvoiceData(is_invoice=True)
 
         return InvoiceData(
-            is_invoice=bool(data.get("is_invoice", False)),
+            is_invoice=True,
             vendor=data.get("vendor"),
             amount=data.get("amount"),
             currency=data.get("currency"),
