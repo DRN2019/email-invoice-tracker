@@ -1,9 +1,12 @@
+import logging
 import os
 from pathlib import Path
 
 import msal
 import requests
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 AUTHORITY = "https://login.microsoftonline.com/consumers"
 SCOPES = ["Mail.Read"]
@@ -64,6 +67,7 @@ class GraphEmailClient:
                     {
                         "subject": message.get("subject", ""),
                         "body": message.get("body", {}).get("content", ""),
+                        "sender": message.get("from", {}).get("emailAddress", {}).get("address", ""),
                     }
                 )
                 if len(emails) >= limit:
@@ -95,7 +99,7 @@ class GraphEmailClient:
         if "user_code" not in flow:
             raise RuntimeError(f"Failed to start device flow: {flow.get('error_description', flow)}")
 
-        print(flow["message"])
+        logger.info(flow["message"])
         result = self.app.acquire_token_by_device_flow(flow)
         if "access_token" not in result:
             raise RuntimeError(f"Failed to acquire token: {result.get('error_description', result)}")

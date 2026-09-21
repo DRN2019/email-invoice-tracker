@@ -3,10 +3,11 @@ from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_RANGE = "Sheet1!A1"
-HEADER_RANGE = "Sheet1!A1:G1"
+HEADER_RANGE = "Sheet1!A1:H1"
 
 # Must match the column order output_to_google_sheet() appends in invoice_extractor.py.
-HEADERS = ["Vendor", "Amount", "Currency", "Invoice Number", "Invoice Date", "Due Date", "Recorded At"]
+# TODO: move to constants file, make these values based on the object schema so any changes there can be reflected appropriately here
+HEADERS = ["Vendor", "Sender", "Amount", "Currency", "Invoice Number", "Invoice Date", "Due Date", "Recorded At"]
 
 
 class GoogleSheetsClient:

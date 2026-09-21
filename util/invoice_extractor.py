@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,6 +10,8 @@ from huggingface_hub import hf_hub_download
 from llama_cpp import Llama
 
 from .sheets_client import GoogleSheetsClient
+
+logger = logging.getLogger(__name__)
 
 MODEL_REPO = "Qwen/Qwen2.5-3B-Instruct-GGUF"
 MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
@@ -29,7 +32,7 @@ EXTRACT_SYSTEM_PROMPT = (
     "this schema:\n"
     '{"vendor": string|null, "amount": number|null, "currency": string|null, '
     '"invoice_number": string|null, "invoice_date": string|null, "due_date": string|null}\n'
-    "Dates must be in YYYY-MM-DD format if present. Pay close attention to correctly identifying "
+    "Dates must be in YYYY/MM/DD format if present. Pay close attention to correctly identifying "
     "the total amount due, even if it is labeled as 'Total Balance' or similar rather than 'Amount'."
 )
 
@@ -56,6 +59,7 @@ EXTRACT_SCHEMA = {
 @dataclass
 class InvoiceData:
     is_invoice: bool
+    sender: str | None = None
     vendor: str | None = None
     amount: float | None = None
     currency: str | None = None
@@ -86,10 +90,11 @@ class InvoiceExtractor:
 
         results = []
         for i, email in enumerate(emails):
-            print(f"Processing email {i}!")
+            logger.debug("Processing email %d: %s", i, email.get("subject", "(no subject)"))
             invoice_data = self.extract_invoice_amount(email)
             if invoice_data.is_invoice:
-                print("Invoice found! Adding row to google sheet")
+                invoice_data.sender = email.get("sender", "")
+                logger.info("Invoice found in email %d: vendor=%s amount=%s sender=%s", i, invoice_data.vendor, invoice_data.amount, invoice_data.sender)
                 self.output_to_google_sheet(invoice_data)
                 results.append(invoice_data)
         return results
@@ -150,7 +155,7 @@ class InvoiceExtractor:
         assert isinstance(response, dict)
         raw_output = response["choices"][0]["message"]["content"]
         if verbose:
-            print(f"raw classify output: {raw_output!r}")
+            logger.debug("raw classify output: %r", raw_output)
         if raw_output is None:
             return False
 
@@ -186,7 +191,7 @@ class InvoiceExtractor:
         assert isinstance(response, dict)
         raw_output = response["choices"][0]["message"]["content"]
         if verbose:
-            print(f"raw extract output: {raw_output!r}")
+            logger.debug("raw extract output: %r", raw_output)
         if raw_output is None:
             return InvoiceData(is_invoice=True)
         return self._parse_extract_response(raw_output)
@@ -227,6 +232,7 @@ class InvoiceExtractor:
 
         row = [
             invoice_data.vendor,
+            invoice_data.sender,
             invoice_data.amount,
             invoice_data.currency,
             invoice_data.invoice_number,
