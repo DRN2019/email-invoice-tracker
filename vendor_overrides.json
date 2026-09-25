@@ -1,0 +1,4 @@
+{
+  "_comment": "Maps sender email domain -> display vendor name. Longest matching suffix wins, so 'billing.comcast.com' falls back to a 'comcast.com' entry. Used whenever the model can't confidently extract a vendor name from the email body.",
+  "example.com": "Example Inc."
+}

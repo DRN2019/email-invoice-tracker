@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from huggingface_hub import hf_hub_download
@@ -18,6 +19,7 @@ MODEL_FILE = "qwen2.5-3b-instruct-q4_k_m.gguf"
 MODEL_DIR = Path(__file__).resolve().parent.parent / "models"
 
 DEFAULT_MAX_BODY_CHARS = 12000
+DEFAULT_VENDOR_OVERRIDES_PATH = Path(__file__).resolve().parent.parent / "vendor_overrides.json"
 
 CLASSIFY_SYSTEM_PROMPT = (
     "You are an assistant that reads only the subject line of an email and decides whether it is "
@@ -33,7 +35,18 @@ EXTRACT_SYSTEM_PROMPT = (
     '{"vendor": string|null, "amount": number|null, "currency": string|null, '
     '"invoice_number": string|null, "invoice_date": string|null, "due_date": string|null}\n'
     "Dates must be in YYYY/MM/DD format if present. Pay close attention to correctly identifying "
-    "the total amount due, even if it is labeled as 'Total Balance' or similar rather than 'Amount'."
+    "the total amount due, even if it is labeled as 'Total Balance' or similar rather than 'Amount'.\n\n"
+    "'vendor' and 'invoice_number' are easy to confuse -- read their definitions carefully:\n"
+    "- vendor: the name of the company or organization that issued the bill (e.g. 'Comcast', "
+    "'Verizon Wireless', 'Acme Cloud Hosting'). This is always a business name made of words, "
+    "never a number or a code.\n"
+    "- invoice_number: the invoice/order/account/confirmation identifier, usually labeled 'Invoice #', "
+    "'Order Number', 'Account Number', or similar. This is typically a short alphanumeric code, not "
+    "a business name.\n"
+    "These two fields must never have the same value, and invoice_number must never be copied into "
+    "vendor. If you cannot confidently identify the vendor's business name in the email, set "
+    "'vendor' to null rather than guessing with the invoice number, an account number, or any other "
+    "code."
 )
 
 CLASSIFY_SCHEMA = {
@@ -81,6 +94,8 @@ class InvoiceExtractor:
         self.llm: Llama | None = None
         self.sheets_client = None
         self.max_body_chars: int = DEFAULT_MAX_BODY_CHARS
+        self.vendor_overrides_path: Path = DEFAULT_VENDOR_OVERRIDES_PATH
+        self.vendor_overrides: dict[str, str] = {}
 
     def extract(self, emails: list[dict]) -> list[InvoiceData]:
         """Entry point: loads config and the model once, then runs each email
@@ -94,6 +109,7 @@ class InvoiceExtractor:
             invoice_data = self.extract_invoice_amount(email)
             if invoice_data.is_invoice:
                 invoice_data.sender = email.get("sender", "")
+                self._resolve_vendor(invoice_data)
                 logger.info("Invoice found in email %d: vendor=%s amount=%s sender=%s", i, invoice_data.vendor, invoice_data.amount, invoice_data.sender)
                 self.output_to_google_sheet(invoice_data)
                 results.append(invoice_data)
@@ -106,6 +122,25 @@ class InvoiceExtractor:
         self.google_sheet_id = os.environ["GOOGLE_SHEET_ID"]
         self.google_service_account_path = os.environ["GOOGLE_SERVICE_ACCOUNT_PATH"]
         self.max_body_chars = int(os.environ.get("MAX_BODY_CHARS", DEFAULT_MAX_BODY_CHARS))
+        self.vendor_overrides_path = Path(
+            os.environ.get("VENDOR_OVERRIDES_PATH", DEFAULT_VENDOR_OVERRIDES_PATH)
+        )
+        self.vendor_overrides = self._load_vendor_overrides()
+
+    def _load_vendor_overrides(self) -> dict[str, str]:
+        """Reads the domain -> vendor name table used to backstop the LLM's vendor
+        guesses. A missing file just means no overrides have been added yet."""
+        if not self.vendor_overrides_path.exists():
+            return {}
+
+        with open(self.vendor_overrides_path, encoding="utf-8") as f:
+            raw: dict[str, Any] = json.load(f)
+
+        return {
+            domain.strip().lower(): name
+            for domain, name in raw.items()
+            if not domain.startswith("_") and isinstance(name, str)
+        }
 
     def register_api(self) -> None:
         """Downloads the GGUF weights into models/ only on first run, then loads
@@ -223,6 +258,55 @@ class InvoiceExtractor:
             invoice_date=data.get("invoice_date"),
             due_date=data.get("due_date"),
         )
+
+    def _resolve_vendor(self, invoice_data: InvoiceData) -> None:
+        """Backstops the LLM's vendor guess: fills it in from the sender's domain
+        when the model left it null, and overwrites it when it looks like the
+        invoice number (or some other code) got copied into the vendor field."""
+        vendor = invoice_data.vendor
+        vendor_is_suspect = (
+            not vendor
+            or self._looks_like_code(vendor)
+            or (invoice_data.invoice_number is not None and vendor == invoice_data.invoice_number)
+        )
+        if not vendor_is_suspect:
+            return
+
+        fallback = self._vendor_from_sender(invoice_data.sender)
+        if fallback:
+            invoice_data.vendor = fallback
+
+    def _vendor_from_sender(self, sender: str | None) -> str | None:
+        """Maps a sender email address to a vendor name: checks the override table
+        against progressively shorter domain suffixes (so an override for
+        'comcast.com' also matches a sender at 'billing.comcast.com'), then falls
+        back to a title-cased guess from the domain's second-level label."""
+        if not sender or "@" not in sender:
+            return None
+
+        domain = sender.rsplit("@", 1)[-1].strip().lower()
+        if not domain:
+            return None
+
+        labels = domain.split(".")
+        for i in range(len(labels) - 1):
+            candidate = ".".join(labels[i:])
+            if candidate in self.vendor_overrides:
+                return self.vendor_overrides[candidate]
+
+        label = labels[-2] if len(labels) >= 2 else labels[0]
+        return label.replace("-", " ").replace("_", " ").title()
+
+    @staticmethod
+    def _looks_like_code(value: str) -> bool:
+        """Heuristic guard against the model copying an invoice/account number into
+        the vendor field: real vendor names are words, not digit-heavy tokens with
+        no spaces."""
+        stripped = value.strip()
+        if not stripped or " " in stripped:
+            return False
+        digit_ratio = sum(c.isdigit() for c in stripped) / len(stripped)
+        return digit_ratio >= 0.4
 
     def output_to_google_sheet(self, invoice_data: InvoiceData) -> None:
         """Appends one row per invoice, plus when the tracker recorded it (separate

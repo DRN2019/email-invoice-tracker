@@ -82,6 +82,14 @@ SENDERS=
 emails get scanned (e.g. `billing@vendor.com, invoices@saas.com`). Leave it blank to scan all
 recent emails.
 
+`VENDOR_OVERRIDES_PATH` is optional (defaults to `vendor_overrides.json` in the project root). It
+points at a JSON file mapping sender email domains to vendor display names, e.g.
+`{"comcast.com": "Comcast"}`. When the model can't confidently extract a vendor (or puts an
+invoice number in the vendor field), the tracker looks up the sender's domain in this file, also
+matching parent domains (so `comcast.com` covers `billing.comcast.com`). If there's no entry, it
+falls back to a title-cased guess from the domain name. Keys starting with `_` are ignored, so you
+can leave notes in the file.
+
 If you keep the Google service account JSON key file inside this project folder, add its filename
 to `.gitignore` before committing anything — it's a credential, not source code.
 
