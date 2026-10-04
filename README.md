@@ -108,6 +108,13 @@ python main.py
 Subsequent runs are unattended — schedule `python main.py` via Task Scheduler (Windows) or cron
 (Linux/Raspberry Pi) to run once a day.
 
+**Lookback window:** by default, only emails from the last 24 hours are checked. Override this
+with `--hours`:
+
+```bash
+python main.py --hours 72
+```
+
 **Debugging missed/misclassified emails:** run with `--verbose` to log the raw LLM output (the
 JSON returned by both the subject-only classify step and the full-body extract step) for every
 email, at DEBUG level, to both the console and the log file:
