@@ -30,7 +30,8 @@ class GraphEmailClient:
         )
 
     def fetch_recent_emails(self, since_iso: str | None = None, limit: int = 50) -> list[dict]:
-        """Returns emails newest-first as {subject, body} dicts, ready for InvoiceExtractor.
+        """Returns emails newest-first as {subject, body, sender, received_date} dicts, ready
+        for InvoiceExtractor.
 
         Requests plain-text bodies via the Prefer header so the LLM prompt isn't fed raw HTML."""
         access_token = self._get_access_token()
@@ -68,6 +69,7 @@ class GraphEmailClient:
                         "subject": message.get("subject", ""),
                         "body": message.get("body", {}).get("content", ""),
                         "sender": message.get("from", {}).get("emailAddress", {}).get("address", ""),
+                        "received_date": message.get("receivedDateTime", ""),
                     }
                 )
                 if len(emails) >= limit:

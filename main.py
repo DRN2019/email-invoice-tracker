@@ -1,3 +1,4 @@
+import argparse
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -7,10 +8,14 @@ from util.graph_client import GraphEmailClient
 from util.invoice_extractor import InvoiceExtractor
 from util.logger import setup_logger
 
-LOOKBACK_HOURS = 24
+LOOKBACK_HOURS = 3700
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--verbose", action="store_true", help="Log raw LLM output for each email")
+    args = parser.parse_args()
+
     logger = setup_logger()
     load_dotenv()
     client_id = os.environ["AZURE_CLIENT_ID"]
@@ -24,7 +29,7 @@ def main() -> None:
     logger.info("Fetched %d email(s) from the last %d hours.", len(emails), LOOKBACK_HOURS)
 
     extractor = InvoiceExtractor()
-    invoices = extractor.extract(emails)
+    invoices = extractor.extract(emails, verbose=args.verbose)
     logger.info("Found %d invoice(s); rows appended to the sheet.", len(invoices))
 
 

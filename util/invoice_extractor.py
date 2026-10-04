@@ -23,8 +23,8 @@ DEFAULT_VENDOR_OVERRIDES_PATH = Path(__file__).resolve().parent.parent / "vendor
 
 CLASSIFY_SYSTEM_PROMPT = (
     "You are an assistant that reads only the subject line of an email and decides whether it is "
-    "an invoice or bill (this includes notifications that a bill/invoice is ready to view, e.g. "
-    "'Your bill from X is now available', 'Invoice #1234 from Y', 'Payment due'). "
+    "an invoice (this includes notifications that a bill/invoice/statement is ready to view, e.g. "
+    "'Your bill from X is now available', 'Invoice #1234 from Y', 'Payment due', 'Your statement is ready'). "
     'Respond with ONLY a JSON object, no other text, matching this schema: {"is_invoice": bool}'
 )
 
@@ -97,7 +97,7 @@ class InvoiceExtractor:
         self.vendor_overrides_path: Path = DEFAULT_VENDOR_OVERRIDES_PATH
         self.vendor_overrides: dict[str, str] = {}
 
-    def extract(self, emails: list[dict]) -> list[InvoiceData]:
+    def extract(self, emails: list[dict], verbose: bool = False) -> list[InvoiceData]:
         """Entry point: loads config and the model once, then runs each email
         through extraction, forwarding only genuine invoices to the sheet."""
         self.read_environment_variables()
@@ -106,10 +106,11 @@ class InvoiceExtractor:
         results = []
         for i, email in enumerate(emails):
             logger.debug("Processing email %d: %s", i, email.get("subject", "(no subject)"))
-            invoice_data = self.extract_invoice_amount(email)
+            invoice_data = self.extract_invoice_amount(email, verbose=verbose)
             if invoice_data.is_invoice:
                 invoice_data.sender = email.get("sender", "")
                 self._resolve_vendor(invoice_data)
+                self._resolve_invoice_date(invoice_data, email)
                 logger.info("Invoice found in email %d: vendor=%s amount=%s sender=%s", i, invoice_data.vendor, invoice_data.amount, invoice_data.sender)
                 self.output_to_google_sheet(invoice_data)
                 results.append(invoice_data)
@@ -275,6 +276,19 @@ class InvoiceExtractor:
         fallback = self._vendor_from_sender(invoice_data.sender)
         if fallback:
             invoice_data.vendor = fallback
+
+    def _resolve_invoice_date(self, invoice_data: InvoiceData, email: dict) -> None:
+        """Backstops a missing invoice_date: when the model couldn't find a date in
+        the email body, falls back to the date the email itself was received so the
+        sheet row doesn't go out with that field blank."""
+        if invoice_data.invoice_date:
+            return
+
+        received_date = email.get("received_date")
+        if not received_date:
+            return
+
+        invoice_data.invoice_date = received_date[:10]
 
     def _vendor_from_sender(self, sender: str | None) -> str | None:
         """Maps a sender email address to a vendor name: checks the override table

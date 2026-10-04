@@ -108,6 +108,19 @@ python main.py
 Subsequent runs are unattended — schedule `python main.py` via Task Scheduler (Windows) or cron
 (Linux/Raspberry Pi) to run once a day.
 
+**Debugging missed/misclassified emails:** run with `--verbose` to log the raw LLM output (the
+JSON returned by both the subject-only classify step and the full-body extract step) for every
+email, at DEBUG level, to both the console and the log file:
+
+```bash
+python main.py --verbose
+```
+
+This still hits the real Graph API and appends real rows to your sheet. To test the model against
+a single hardcoded email without touching Graph/Sheets at all, see `test/debug_spectrum_check.py`
+(`python test/debug_spectrum_check.py`), which compares the old single-call full-body prompt
+against the new subject-only gate.
+
 ## Notes
 
 - **Raspberry Pi:** this is designed to run comfortably on a Pi (4GB+ RAM) since it uses a
